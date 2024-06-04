@@ -1,0 +1,10 @@
+name: "DCO"
+description: "This App enforces the Developer Certificate of Origin (DCO) on Pull Requests."
+inputs:
+  token: # id of input
+    description: "Github token secrets.GITHUB_TOKEN"
+    required: true
+outputs: {}
+runs:
+  using: "node20"
+  main: "dist/index.js"

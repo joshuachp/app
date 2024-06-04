@@ -1,165 +1,157 @@
 const getDCOStatus = require("./lib/dco.js");
+const core = require("@actions/core");
+const github = require("@actions/github");
+
 const requireMembers = require("./lib/requireMembers.js");
 
-/**
- * @param {import('probot').Probot} app
+/*
+ * @param {github.context} co
  */
-module.exports = (app) => {
-  app.on(
-    [
-      "pull_request.opened",
-      "pull_request.synchronize",
-      "check_run.rerequested",
-    ],
-    check
+async function run() {
+  const timeStart = new Date();
+
+  const requireForMembers = true;
+  const allowRemediationCommits = {
+    individual: false,
+    thirdParty: false,
+  };
+
+  const context = github.context;
+
+  const wrap_repo = function (object) {
+    const repo = context.payload.repository;
+
+    if (!repo) {
+      throw new Error(
+        "context.repo() is not supported for this webhook event.",
+      );
+    }
+
+    return Object.assign(
+      {
+        owner: repo.owner.login,
+        repo: repo.name,
+      },
+      object,
+    );
+  };
+
+  const pr = context.payload.pull_request;
+
+  // myToken: ${{ secrets.GITHUB_TOKEN }}
+  const token = core.getInput("token");
+  const octokit = github.getOctokit(token).rest;
+
+  const compare = await octokit.repos.compareCommits(
+    wrap_repo({
+      base: pr.base.sha,
+      head: pr.head.sha,
+    }),
   );
 
-  async function check(context) {
-    const timeStart = new Date();
+  const commits = compare.data.commits;
+  const dcoFailed = await getDCOStatus(
+    commits,
+    requireMembers(requireForMembers, context),
+    context.payload.pull_request.html_url,
+    allowRemediationCommits,
+  );
 
-    const config = await context.config("dco.yml", {
-      require: {
-        members: true,
-      },
-      allowRemediationCommits: {
-        individual: false,
-        thirdParty: false,
-      },
+  if (!dcoFailed.length) {
+    // await octokit.checks
+    //   .create(
+    //     wrap_repo({
+    //       name: "DCO",
+    //       head_branch: pr.head.ref,
+    //       head_sha: pr.head.sha,
+    //       status: "completed",
+    //       started_at: timeStart,
+    //       conclusion: "success",
+    //       completed_at: new Date(),
+    //       output: {
+    //         title: "DCO",
+    //         summary: "All commits are signed off!",
+    //       },
+    //     }),
+    //   )
+    //   .catch(function checkFails(error) {
+    //     /* istanbul ignore next - unexpected error */
+    //     if (error.status !== 403) throw error;
+
+    //     core.info("resource not accessible, creating status instead");
+    //     // create status
+    //     const params = {
+    //       sha: pr.head.sha,
+    //       context: "DCO",
+    //       state: "success",
+    //       description: "All commits are signed off!",
+    //       target_url: "https://github.com/probot/dco#how-it-works",
+    //     };
+    //     return octokit.repos.createCommitStatus(wrap_repo(params));
+    //   });
+    core.info("DCO success. All commits are signed off!");
+    return;
+  } else {
+    let summary = [];
+    dcoFailed.forEach(function (commit) {
+      summary.push(
+        `Commit sha: [${commit.sha.substr(0, 7)}](${commit.url}), Author: ${
+          commit.author
+        }, Committer: ${commit.committer}; ${commit.message}`,
+      );
     });
-    const requireForMembers = config.require.members;
-    const allowRemediationCommits = config.allowRemediationCommits;
+    summary = summary.join("\n");
 
-    const pr = context.payload.pull_request;
+    summary =
+      handleCommits(pr, commits.length, dcoFailed, allowRemediationCommits) +
+      `\n\n### Summary\n\n${summary}`;
 
-    const compare = await context.octokit.repos.compareCommits(
-      context.repo({
-        base: pr.base.sha,
-        head: pr.head.sha,
-      })
-    );
+    // await octokit.checks
+    //   .create(
+    //     wrap_repo({
+    //       name: "DCO",
+    //       head_branch: pr.head.ref,
+    //       head_sha: pr.head.sha,
+    //       status: "completed",
+    //       started_at: timeStart,
+    //       conclusion: "action_required",
+    //       completed_at: new Date(),
+    //       output: {
+    //         title: "DCO",
+    //         summary,
+    //       },
+    //       actions: [
+    //         {
+    //           label: "Set DCO to pass",
+    //           description: "would set status to passing",
+    //           identifier: "override",
+    //         },
+    //       ],
+    //     }),
+    //   )
+    //   .catch(function checkFails(error) {
+    //     /* istanbul ignore next - unexpected error */
+    //     if (error.status !== 403) throw error;
 
-    const commits = compare.data.commits;
-    const dcoFailed = await getDCOStatus(
-      commits,
-      requireMembers(requireForMembers, context),
-      context.payload.pull_request.html_url,
-      allowRemediationCommits
-    );
-
-    if (!dcoFailed.length) {
-      await context.octokit.checks
-        .create(
-          context.repo({
-            name: "DCO",
-            head_branch: pr.head.ref,
-            head_sha: pr.head.sha,
-            status: "completed",
-            started_at: timeStart,
-            conclusion: "success",
-            completed_at: new Date(),
-            output: {
-              title: "DCO",
-              summary: "All commits are signed off!",
-            },
-          })
-        )
-        .catch(function checkFails(error) {
-          /* istanbul ignore next - unexpected error */
-          if (error.status !== 403) throw error;
-
-          context.log.info("resource not accessible, creating status instead");
-          // create status
-          const params = {
-            sha: pr.head.sha,
-            context: "DCO",
-            state: "success",
-            description: "All commits are signed off!",
-            target_url: "https://github.com/probot/dco#how-it-works",
-          };
-          return context.octokit.repos.createCommitStatus(context.repo(params));
-        });
-    } else {
-      let summary = [];
-      dcoFailed.forEach(function (commit) {
-        summary.push(
-          `Commit sha: [${commit.sha.substr(0, 7)}](${commit.url}), Author: ${
-            commit.author
-          }, Committer: ${commit.committer}; ${commit.message}`
-        );
-      });
-      summary = summary.join("\n");
-
-      summary =
-        handleCommits(pr, commits.length, dcoFailed, allowRemediationCommits) +
-        `\n\n### Summary\n\n${summary}`;
-
-      await context.octokit.checks
-        .create(
-          context.repo({
-            name: "DCO",
-            head_branch: pr.head.ref,
-            head_sha: pr.head.sha,
-            status: "completed",
-            started_at: timeStart,
-            conclusion: "action_required",
-            completed_at: new Date(),
-            output: {
-              title: "DCO",
-              summary,
-            },
-            actions: [
-              {
-                label: "Set DCO to pass",
-                description: "would set status to passing",
-                identifier: "override",
-              },
-            ],
-          })
-        )
-        .catch(function checkFails(error) {
-          /* istanbul ignore next - unexpected error */
-          if (error.status !== 403) throw error;
-
-          context.log.info("resource not accessible, creating status instead");
-          // create status
-          const description = dcoFailed[dcoFailed.length - 1].message.substring(
-            0,
-            140
-          );
-          const params = {
-            sha: pr.head.sha,
-            context: "DCO",
-            state: "failure",
-            description,
-            target_url: "https://github.com/probot/dco#how-it-works",
-          };
-          return context.octokit.repos.createCommitStatus(context.repo(params));
-        });
-    }
+    //     core.info("resource not accessible, creating status instead");
+    //     // create status
+    //     const description = dcoFailed[dcoFailed.length - 1].message.substring(
+    //       0,
+    //       140,
+    //     );
+    //     const params = {
+    //       sha: pr.head.sha,
+    //       context: "DCO",
+    //       state: "failure",
+    //       description,
+    //       target_url: "https://github.com/probot/dco#how-it-works",
+    //     };
+    //     return octokit.repos.createCommitStatus(wrap_repo(params));
+    //   });
+    core.error("DCO not passed!\n\n" + summary);
+    throw new Error("Commit not signed off");
   }
-
-  // This option is only presented to users with Write Access to the repo
-  app.on("check_run.requested_action", setStatusPass);
-  async function setStatusPass(context) {
-    const timeStart = new Date();
-
-    await context.octokit.checks.create(
-      context.repo({
-        name: "DCO",
-        head_branch: context.payload.check_run.check_suite.head_branch,
-        head_sha: context.payload.check_run.head_sha,
-        status: "completed",
-        started_at: timeStart,
-        conclusion: "success",
-        completed_at: new Date(),
-        output: {
-          title: "DCO",
-          summary: "Commit sign-off was manually approved.",
-        },
-      })
-    );
-  }
-};
+}
 
 function handleCommits(pr, commitLength, dcoFailed, allowRemediationCommits) {
   let returnMessage = "";
@@ -287,3 +279,6 @@ To add your Signed-off-by line to every commit in this branch:
 
   return returnMessage;
 }
+
+/// Main
+run();
